@@ -1,6 +1,6 @@
 # Wordfence CLI Manager for cPanel
 
-A Python script to automate the installation and scanning operations of [Wordfence CLI](https://github.com/wordfence/wordfence-cli) across cPanel accounts on a shared hosting server.
+A Python script to automate the installation and scanning operations of [Wordfence CLI](https://github.com/wordfence/wordfence-cli) across cPanel accounts on a server.
 
 ---
 
