@@ -30,7 +30,7 @@ A Python script to automate the installation and scanning operations of [Wordfen
 Clone or download the script to your server:
 
 ```bash
-wget https://raw.githubusercontent.com/your-username/your-repo/main/wordfence_manager.py
+wget https://raw.githubusercontent.com/anoopmedackal/Wordfence-CLI-Manager-for-cPanel/main/wordfence_manager.py
 chmod +x wordfence_manager.py
 ```
 
