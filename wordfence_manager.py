@@ -3,6 +3,8 @@
 Wordfence CLI Manager for cPanel Accounts
 Handles installation and scanning operations via cPanel user switching.
 Requires: pexpect  (auto-installed if missing)
+Compatible with: CloudLinux (Python 3.8 via /opt/alt) and AlmaLinux/standard servers (Python 3.8+)
+Minimum requirement: Python 3.8 / pip 3.8
 """
 
 import subprocess
@@ -16,6 +18,94 @@ except ImportError:
     print("pexpect not found. Installing via pip ...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pexpect", "-q"])
     import pexpect
+
+
+# ─────────────────────────── pip detection ──────────────────────────────────
+
+# Candidates in order of preference — must be 3.8 or higher
+PIP_CANDIDATES = [
+    ("/opt/alt/python38/bin/pip3.8", (3, 8)),   # CloudLinux Python Selector 3.8
+    ("/opt/alt/python39/bin/pip3.9", (3, 9)),   # CloudLinux Python Selector 3.9
+    ("/opt/alt/python310/bin/pip3.10", (3, 10)),# CloudLinux Python Selector 3.10
+    ("/opt/alt/python311/bin/pip3.11", (3, 11)),# CloudLinux Python Selector 3.11
+    ("/usr/bin/pip3.9",  (3, 9)),               # AlmaLinux 9 / standard
+    ("/usr/bin/pip3.8",  (3, 8)),               # Standard 3.8
+    ("/usr/bin/pip3.10", (3, 10)),              # Standard 3.10
+    ("/usr/bin/pip3.11", (3, 11)),              # Standard 3.11
+    ("/usr/bin/pip3",    None),                 # Generic — version checked at runtime
+    ("/usr/local/bin/pip3", None),              # Custom installs
+]
+
+MIN_VERSION = (3, 8)
+
+
+def get_pip_version(pip_bin):
+    """
+    Return the (major, minor) tuple of the given pip binary,
+    or None if it cannot be determined.
+    """
+    try:
+        out = subprocess.check_output(
+            [pip_bin, "--version"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        # Output looks like: pip 21.3.1 from ... (python 3.9)
+        for part in out.split():
+            if part.startswith("(python"):
+                # part = "(python" and next token is "3.9)"
+                continue
+            if part.replace(".", "").isdigit() and "." in part:
+                major, minor = int(part.split(".")[0]), int(part.split(".")[1])
+                if major == 3:
+                    return (major, minor)
+        # Fallback: parse "python X.Y" at the end of the version string
+        if "python" in out:
+            token = out.split("python")[-1].strip().rstrip(")")
+            parts = token.split(".")
+            if len(parts) >= 2:
+                return (int(parts[0]), int(parts[1]))
+    except Exception:
+        pass
+    return None
+
+
+def detect_pip():
+    """
+    Return the first pip binary on this server that is >= 3.8.
+    If a pip is found but is below 3.8, print an error and exit.
+    If no pip is found at all, print an error and exit.
+    """
+    found_but_too_old = []
+
+    for pip_bin, known_version in PIP_CANDIDATES:
+        if not os.path.isfile(pip_bin):
+            continue
+
+        # Use the known version if hardcoded, otherwise detect at runtime
+        version = known_version if known_version else get_pip_version(pip_bin)
+
+        if version is None:
+            # Could not determine version — skip this candidate
+            continue
+
+        if version >= MIN_VERSION:
+            return pip_bin, version
+        else:
+            found_but_too_old.append((pip_bin, version))
+
+    # No suitable pip found — give a helpful error
+    if found_but_too_old:
+        print("\n  [ERROR] pip version is less than 3.8.")
+        print("          The following pip binaries were found but do not meet the minimum requirement (3.8):")
+        for pip_bin, version in found_but_too_old:
+            print("            {} (python {}.{})".format(pip_bin, version[0], version[1]))
+        print("          Please install Python 3.8 or higher and try again.")
+    else:
+        print("\n  [ERROR] No pip binary (3.8 or higher) was found on this server.")
+        print("          Please install Python 3.8+ and ensure pip is available.")
+
+    sys.exit(1)
 
 
 # ─────────────────────────── helpers ────────────────────────────────────────
@@ -123,7 +213,7 @@ def configure_wordfence_pexpect(user, license_key):
 
 # ─────────────────────────── install flow ───────────────────────────────────
 
-def install_wordfence(users, license_key):
+def install_wordfence(users, license_key, pip_bin):
     """Install Wordfence CLI for each cPanel user and run initial config."""
     for user in users:
         section("Installing Wordfence CLI for user: {}".format(user))
@@ -132,7 +222,7 @@ def install_wordfence(users, license_key):
         print("\n[1/2] Running pip install for '{}' ...".format(user))
         rc = run_as_user(
             user,
-            "/opt/alt/python38/bin/pip3.8 install wordfence --user"
+            "{} install wordfence --user".format(pip_bin)
         )
         if rc != 0:
             print("  [!] pip install returned exit code {} for '{}'. Continuing anyway.".format(rc, user))
@@ -189,9 +279,21 @@ def run_scan(user, scan_type):
 # ─────────────────────────── entry point ────────────────────────────────────
 
 def main():
+    # Check that the script itself is running on Python 3.8+
+    if sys.version_info < MIN_VERSION:
+        print("\n  [ERROR] This script requires Python 3.8 or higher.")
+        print("          Current Python version: {}.{}.{}".format(*sys.version_info[:3]))
+        print("          Please run using python3.8 or higher.")
+        sys.exit(1)
+
     print("\n+----------------------------------------------+")
     print("|     Wordfence CLI Manager for cPanel        |")
     print("+----------------------------------------------+")
+
+    # Detect pip early — exits with a clear error if none >= 3.8 is found
+    pip_bin, pip_version = detect_pip()
+    print("  [INFO] Using pip binary : {}".format(pip_bin))
+    print("  [INFO] pip Python version: {}.{}".format(*pip_version))
 
     action = prompt_choice(
         "What would you like to do?",
@@ -214,7 +316,7 @@ def main():
         if not license_key:
             print("  No license key provided. Exiting.")
             sys.exit(1)
-        install_wordfence(users, license_key)
+        install_wordfence(users, license_key, pip_bin)
 
     # Scan branch
     else:
