@@ -20,20 +20,20 @@ except ImportError:
     import pexpect
 
 
-# ─────────────────────────── pip detection ──────────────────────────────────
+# ----------------------------- pip detection --------------------------------
 
-# Candidates in order of preference — must be 3.8 or higher
+# Candidates in order of preference -- must be 3.8 or higher
 PIP_CANDIDATES = [
-    ("/opt/alt/python38/bin/pip3.8", (3, 8)),   # CloudLinux Python Selector 3.8
-    ("/opt/alt/python39/bin/pip3.9", (3, 9)),   # CloudLinux Python Selector 3.9
-    ("/opt/alt/python310/bin/pip3.10", (3, 10)),# CloudLinux Python Selector 3.10
-    ("/opt/alt/python311/bin/pip3.11", (3, 11)),# CloudLinux Python Selector 3.11
-    ("/usr/bin/pip3.9",  (3, 9)),               # AlmaLinux 9 / standard
-    ("/usr/bin/pip3.8",  (3, 8)),               # Standard 3.8
-    ("/usr/bin/pip3.10", (3, 10)),              # Standard 3.10
-    ("/usr/bin/pip3.11", (3, 11)),              # Standard 3.11
-    ("/usr/bin/pip3",    None),                 # Generic — version checked at runtime
-    ("/usr/local/bin/pip3", None),              # Custom installs
+    ("/opt/alt/python38/bin/pip3.8",   (3, 8)),    # CloudLinux Python Selector 3.8
+    ("/opt/alt/python39/bin/pip3.9",   (3, 9)),    # CloudLinux Python Selector 3.9
+    ("/opt/alt/python310/bin/pip3.10", (3, 10)),   # CloudLinux Python Selector 3.10
+    ("/opt/alt/python311/bin/pip3.11", (3, 11)),   # CloudLinux Python Selector 3.11
+    ("/usr/bin/pip3.9",                (3, 9)),    # AlmaLinux 9 / standard
+    ("/usr/bin/pip3.8",                (3, 8)),    # Standard 3.8
+    ("/usr/bin/pip3.10",               (3, 10)),   # Standard 3.10
+    ("/usr/bin/pip3.11",               (3, 11)),   # Standard 3.11
+    ("/usr/bin/pip3",                  None),      # Generic -- version checked at runtime
+    ("/usr/local/bin/pip3",            None),      # Custom installs
 ]
 
 MIN_VERSION = (3, 8)
@@ -51,19 +51,10 @@ def get_pip_version(pip_bin):
             text=True
         )
         # Output looks like: pip 21.3.1 from ... (python 3.9)
-        for part in out.split():
-            if part.startswith("(python"):
-                # part = "(python" and next token is "3.9)"
-                continue
-            if part.replace(".", "").isdigit() and "." in part:
-                major, minor = int(part.split(".")[0]), int(part.split(".")[1])
-                if major == 3:
-                    return (major, minor)
-        # Fallback: parse "python X.Y" at the end of the version string
         if "python" in out:
             token = out.split("python")[-1].strip().rstrip(")")
             parts = token.split(".")
-            if len(parts) >= 2:
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
                 return (int(parts[0]), int(parts[1]))
     except Exception:
         pass
@@ -86,7 +77,6 @@ def detect_pip():
         version = known_version if known_version else get_pip_version(pip_bin)
 
         if version is None:
-            # Could not determine version — skip this candidate
             continue
 
         if version >= MIN_VERSION:
@@ -94,7 +84,7 @@ def detect_pip():
         else:
             found_but_too_old.append((pip_bin, version))
 
-    # No suitable pip found — give a helpful error
+    # No suitable pip found -- give a helpful error
     if found_but_too_old:
         print("\n  [ERROR] pip version is less than 3.8.")
         print("          The following pip binaries were found but do not meet the minimum requirement (3.8):")
@@ -108,7 +98,7 @@ def detect_pip():
     sys.exit(1)
 
 
-# ─────────────────────────── helpers ────────────────────────────────────────
+# ----------------------------- helpers -------------------------------------
 
 def run_as_user(user, command):
     """Run a non-interactive shell command as a cPanel user via su."""
@@ -143,6 +133,21 @@ def ask_users(prompt_text, multiple=True):
     return users
 
 
+def ask_wp_path(user):
+    """
+    Prompt for the WordPress installation path.
+    Defaults to /home/<user>/public_html if left blank.
+    """
+    default_path = "/home/{}/public_html".format(user)
+    raw = input(
+        "\nEnter WordPress installation path\n"
+        "(press Enter to use default: {}): ".format(default_path)
+    ).strip()
+    path = raw if raw else default_path
+    print("  [INFO] Scan path set to: {}".format(path))
+    return path
+
+
 def section(title):
     """Print a section divider."""
     print("\n" + "-" * 60)
@@ -150,7 +155,7 @@ def section(title):
     print("-" * 60)
 
 
-# ─────────────────────────── pexpect config ─────────────────────────────────
+# ----------------------------- pexpect config -------------------------------
 
 def configure_wordfence_pexpect(user, license_key):
     """
@@ -173,7 +178,6 @@ def configure_wordfence_pexpect(user, license_key):
             encoding="utf-8",
             timeout=120
         )
-        # Mirror all output to stdout so the operator can see what is happening
         child.logfile_read = sys.stdout
 
         # 1. Configure now?
@@ -196,7 +200,6 @@ def configure_wordfence_pexpect(user, license_key):
         child.expect(r"Number of worker processes.*:")
         child.sendline("")
 
-        # Wait for the process to exit
         child.expect(pexpect.EOF)
         child.close()
 
@@ -211,7 +214,7 @@ def configure_wordfence_pexpect(user, license_key):
         return False
 
 
-# ─────────────────────────── install flow ───────────────────────────────────
+# ----------------------------- install flow ---------------------------------
 
 def install_wordfence(users, license_key, pip_bin):
     """Install Wordfence CLI for each cPanel user and run initial config."""
@@ -243,29 +246,30 @@ def install_wordfence(users, license_key, pip_bin):
     print("  All specified users have been processed.")
 
 
-# ─────────────────────────── scan flow ──────────────────────────────────────
+# ----------------------------- scan flow ------------------------------------
 
 SCAN_MAP = {
     "Malware scan (files)": {
-        "cmd_tpl": ".local/bin/wordfence malware-scan /home/{user}/public_html -a > ~/file_scan.txt &",
+        "cmd_tpl": ".local/bin/wordfence malware-scan {wp_path} -a > ~/file_scan.txt &",
         "out_file": "~/file_scan.txt",
     },
     "Vulnerability scan": {
-        "cmd_tpl": ".local/bin/wordfence vuln-scan /home/{user}/public_html -a > ~/vuln_scan.txt &",
+        "cmd_tpl": ".local/bin/wordfence vuln-scan {wp_path} -a > ~/vuln_scan.txt &",
         "out_file": "~/vuln_scan.txt",
     },
 }
 
 
-def run_scan(user, scan_type):
+def run_scan(user, scan_type, wp_path):
     """Launch the chosen Wordfence scan as the given cPanel user."""
     meta = SCAN_MAP[scan_type]
-    cmd = meta["cmd_tpl"].format(user=user)
+    cmd = meta["cmd_tpl"].format(wp_path=wp_path)
     out = meta["out_file"]
 
     section("Running {} for user: {}".format(scan_type, user))
-    print("  Command : {}".format(cmd))
-    print("  Output  : {}  (inside {}'s home directory)".format(out, user))
+    print("  Scan path : {}".format(wp_path))
+    print("  Command   : {}".format(cmd))
+    print("  Output    : {}  (inside {}'s home directory)".format(out, user))
     print("\n  Launching scan in background ...")
 
     rc = run_as_user(user, cmd)
@@ -276,7 +280,7 @@ def run_scan(user, scan_type):
         print("       Results will be written to {} under /home/{}/".format(out, user))
 
 
-# ─────────────────────────── entry point ────────────────────────────────────
+# ----------------------------- entry point ----------------------------------
 
 def main():
     # Check that the script itself is running on Python 3.8+
@@ -290,10 +294,10 @@ def main():
     print("|     Wordfence CLI Manager for cPanel        |")
     print("+----------------------------------------------+")
 
-    # Detect pip early — exits with a clear error if none >= 3.8 is found
+    # Detect pip early -- exits with a clear error if none >= 3.8 is found
     pip_bin, pip_version = detect_pip()
-    print("  [INFO] Using pip binary : {}".format(pip_bin))
-    print("  [INFO] pip Python version: {}.{}".format(*pip_version))
+    print("  [INFO] Using pip binary    : {}".format(pip_bin))
+    print("  [INFO] pip Python version  : {}.{}".format(*pip_version))
 
     action = prompt_choice(
         "What would you like to do?",
@@ -322,11 +326,12 @@ def main():
     else:
         users = ask_users("Enter the cPanel username to scan", multiple=False)
         user = users[0]
+        wp_path = ask_wp_path(user)
         scan_type = prompt_choice(
             "Which type of scan would you like to run?",
             list(SCAN_MAP.keys()),
         )
-        run_scan(user, scan_type)
+        run_scan(user, scan_type, wp_path)
 
     print("\n  Done. Goodbye!\n")
 
