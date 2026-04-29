@@ -12,11 +12,61 @@ import sys
 import os
 from typing import List
 
+def _find_pip_for_bootstrap():
+    """
+    Find a working pip binary to install pexpect at startup.
+    Tries the pip binary that matches the running Python first,
+    then falls back to other known locations.
+    """
+    py = sys.executable
+    py_dir = os.path.dirname(py)
+    ver = "{}.{}".format(sys.version_info.major, sys.version_info.minor)
+
+    candidates = [
+        os.path.join(py_dir, "pip{}".format(ver)),
+        os.path.join(py_dir, "pip3"),
+        "/opt/alt/python38/bin/pip3.8",
+        "/opt/alt/python39/bin/pip3.9",
+        "/usr/bin/pip3.9",
+        "/usr/bin/pip3.8",
+        "/usr/bin/pip3",
+        "/usr/local/bin/pip3.8",
+        "/usr/local/bin/pip3.9",
+        "/usr/local/bin/pip3",
+    ]
+
+    for pip in candidates:
+        # os.path.exists() follows symlinks, so it returns True even if pip
+        # is a symlink -- unlike os.path.isfile() which can fail on broken links
+        if os.path.exists(pip) and os.access(pip, os.X_OK):
+            return pip
+    return None
+
+
 try:
     import pexpect
 except ImportError:
     print("pexpect not found. Installing via pip ...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pexpect", "-q"])
+    _pip = _find_pip_for_bootstrap()
+    if _pip is None:
+        print("  [ERROR] Could not find a pip binary to install pexpect.")
+        print("          Please install pexpect manually:")
+        print("          /opt/alt/python38/bin/pip3.8 install pexpect --user")
+        sys.exit(1)
+    print("  [INFO] Using pip binary for bootstrap: {}".format(_pip))
+
+    # Determine the user site-packages path for the running Python and
+    # install pexpect there so the correct interpreter can import it.
+    import site
+    user_site = site.getusersitepackages()
+    os.makedirs(user_site, exist_ok=True)
+
+    subprocess.check_call([_pip, "install", "pexpect", "--target", user_site, "-q"])
+
+    # Add the install location to sys.path so we can import it immediately
+    if user_site not in sys.path:
+        sys.path.insert(0, user_site)
+
     import pexpect
 
 
@@ -33,7 +83,10 @@ PIP_CANDIDATES = [
     ("/usr/bin/pip3.10",               (3, 10)),   # Standard 3.10
     ("/usr/bin/pip3.11",               (3, 11)),   # Standard 3.11
     ("/usr/bin/pip3",                  None),      # Generic -- version checked at runtime
-    ("/usr/local/bin/pip3",            None),      # Custom installs
+    ("/usr/local/bin/pip3.8",          (3, 8)),    # Custom installs (also symlink target on CloudLinux)
+    ("/usr/local/bin/pip3.9",          (3, 9)),
+    ("/usr/local/bin/pip3.10",         (3, 10)),
+    ("/usr/local/bin/pip3",            None),
 ]
 
 MIN_VERSION = (3, 8)
@@ -70,7 +123,7 @@ def detect_pip():
     found_but_too_old = []
 
     for pip_bin, known_version in PIP_CANDIDATES:
-        if not os.path.isfile(pip_bin):
+        if not (os.path.exists(pip_bin) and os.access(pip_bin, os.X_OK)):
             continue
 
         # Use the known version if hardcoded, otherwise detect at runtime
