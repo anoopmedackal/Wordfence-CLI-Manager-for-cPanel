@@ -12,6 +12,23 @@ import sys
 import os
 from typing import List
 
+# ----------------------------- ANSI colors ----------------------------------
+
+class C:
+    """ANSI color codes for terminal output."""
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    CYAN    = "\033[96m"    # section headers / scan user
+    GREEN   = "\033[92m"    # success / OK
+    YELLOW  = "\033[93m"    # warnings / info / cache ops
+    RED     = "\033[91m"    # errors
+    MAGENTA = "\033[95m"    # scan path
+    BLUE    = "\033[94m"    # result file location
+
+def c(color, text):
+    """Wrap text in an ANSI color code."""
+    return "{}{}{}".format(color, text, C.RESET)
+
 def _find_pip_for_bootstrap():
     """
     Find a working pip binary to install pexpect at startup.
@@ -203,9 +220,10 @@ def ask_wp_path(user):
 
 def section(title):
     """Print a section divider."""
-    print("\n" + "-" * 60)
-    print("  " + title)
-    print("-" * 60)
+    print("")
+    print(c(C.CYAN, C.BOLD + "-" * 60))
+    print(c(C.CYAN, C.BOLD + "  " + title))
+    print(c(C.CYAN, C.BOLD + "-" * 60))
 
 
 # ----------------------------- pexpect config -------------------------------
@@ -275,15 +293,17 @@ def install_wordfence(users, license_key, pip_bin):
         section("Installing Wordfence CLI for user: {}".format(user))
 
         # Step 1: pip install
+        # Pin urllib3 to v1.x to avoid OpenSSL 1.0.2 incompatibility with urllib3 v2.
+        # urllib3 v2 requires OpenSSL 1.1.1+; older servers (e.g. CentOS 7) ship 1.0.2k.
         print("\n[1/2] Running pip install for '{}' ...".format(user))
         rc = run_as_user(
             user,
-            "{} install wordfence --user".format(pip_bin)
+            '{} install wordfence "urllib3<2" --user'.format(pip_bin)
         )
         if rc != 0:
-            print("  [!] pip install returned exit code {} for '{}'. Continuing anyway.".format(rc, user))
+            print(c(C.YELLOW, "  [!] pip install returned exit code {} for '{}'. Continuing anyway.".format(rc, user)))
         else:
-            print("  [OK] pip install completed for '{}'.".format(user))
+            print(c(C.GREEN, "  [OK] pip install completed for '{}'.".format(user)))
 
         # Step 2: interactive config via pexpect PTY
         print("\n[2/2] Running initial Wordfence CLI configuration for '{}' ...".format(user))
@@ -303,35 +323,161 @@ def install_wordfence(users, license_key, pip_bin):
 
 SCAN_MAP = {
     "Malware scan (files)": {
-        "cmd_tpl": ".local/bin/wordfence malware-scan {wp_path} -a > ~/file_scan.txt &",
+        "cmd_tpl": ".local/bin/wordfence malware-scan {wp_path} -a > ~/file_scan.txt",
         "out_file": "~/file_scan.txt",
     },
     "Vulnerability scan": {
-        "cmd_tpl": ".local/bin/wordfence vuln-scan {wp_path} -a > ~/vuln_scan.txt &",
+        "cmd_tpl": ".local/bin/wordfence vuln-scan {wp_path} -a > ~/vuln_scan.txt",
         "out_file": "~/vuln_scan.txt",
     },
 }
 
+MAX_RETRIES = 3    # Number of retry attempts if the API request fails
+RETRY_DELAY = 30   # Seconds to wait between retries
 
-def run_scan(user, scan_type, wp_path):
-    """Launch the chosen Wordfence scan as the given cPanel user."""
-    meta = SCAN_MAP[scan_type]
-    cmd = meta["cmd_tpl"].format(wp_path=wp_path)
-    out = meta["out_file"]
+# The vulnerability index cache file — hex encoding of "vulnerability_index_production"
+VULN_CACHE_FILE = "76756C6E65726162696C6974795F696E6465785F70726F64756374696F6E"
 
-    section("Running {} for user: {}".format(scan_type, user))
-    print("  Scan path : {}".format(wp_path))
-    print("  Command   : {}".format(cmd))
-    print("  Output    : {}  (inside {}'s home directory)".format(out, user))
-    print("\n  Launching scan in background ...")
 
-    rc = run_as_user(user, cmd)
-    if rc != 0:
-        print("  [!] Scan command returned exit code {}.".format(rc))
-    else:
-        print("  [OK] Scan launched successfully.")
-        print("       Results will be written to {} under /home/{}/".format(out, user))
+def get_cache_dir(user):
+    """Return the Wordfence cache directory path for a cPanel user."""
+    return "/home/{}/.cache/wordfence".format(user)
 
+
+def get_vuln_cache_path(user):
+    """Return the full path to the vulnerability index cache file for a user."""
+    return "{}/{}".format(get_cache_dir(user), VULN_CACHE_FILE)
+
+
+def copy_vuln_cache(source_user, target_user):
+    """
+    Copy the vulnerability index cache file from source_user to target_user.
+    This avoids the target user needing to re-download the ~90MB file from
+    the Wordfence API, which is the main cause of rate limiting errors.
+    """
+    import shutil
+    import pwd
+
+    src      = get_vuln_cache_path(source_user)
+    dst_dir  = get_cache_dir(target_user)
+    dst_file = get_vuln_cache_path(target_user)
+
+    if not os.path.isfile(src):
+        print(c(C.YELLOW, "  [!] Vulnerability cache not found for '{}' at {}.".format(source_user, src)))
+        print(c(C.YELLOW, "      Skipping cache copy -- target user will download from API."))
+        return False
+
+    os.makedirs(dst_dir, exist_ok=True)
+
+    try:
+        shutil.copy2(src, dst_file)
+        pw = pwd.getpwnam(target_user)
+        os.chown(dst_file, pw.pw_uid, pw.pw_gid)
+        os.chmod(dst_file, 0o664)
+        size_mb = os.path.getsize(dst_file) / (1024 * 1024)
+        print(c(C.GREEN, "  [OK] Vulnerability cache copied from '{}' to '{}' ({:.1f} MB).".format(
+            source_user, target_user, size_mb)))
+        return True
+    except Exception as e:
+        print(c(C.RED, "  [!] Failed to copy vulnerability cache to '{}': {}".format(target_user, e)))
+        return False
+
+
+def remove_vuln_cache(user):
+    """
+    Remove the copied vulnerability index cache file from the user's cache
+    directory after their scan completes, to keep things clean.
+    """
+    path = get_vuln_cache_path(user)
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            print(c(C.GREEN, "  [OK] Vulnerability cache cleaned up from '{}'.".format(user)))
+        else:
+            print("  [INFO] No vulnerability cache file found to remove for '{}'.".format(user))
+    except Exception as e:
+        print("  [!] Failed to remove vulnerability cache for '{}': {}".format(user, e))
+
+
+def run_scan_with_retry(user, cmd, out):
+    """
+    Run a scan command as the given user, retrying up to MAX_RETRIES times
+    if the scan fails. Runs in the foreground to capture the exit code.
+    """
+    import time
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        if attempt > 1:
+            print(c(C.YELLOW, "  [RETRY] Attempt {}/{} after {}s delay ...".format(
+                attempt, MAX_RETRIES, RETRY_DELAY)))
+            time.sleep(RETRY_DELAY)
+
+        rc = run_as_user(user, cmd)
+
+        if rc == 0:
+            print(c(C.GREEN, C.BOLD + "  [OK] Scan completed successfully."))
+            print(c(C.BLUE,  "       Results written to {} under /home/{}/".format(out, user)))
+            return True
+        else:
+            print(c(C.YELLOW, "  [!] Scan failed (exit code {}) on attempt {}/{}.".format(
+                rc, attempt, MAX_RETRIES)))
+
+    print(c(C.RED, C.BOLD + "  [ERROR] Scan failed after {} attempts for user '{}'.".format(MAX_RETRIES, user)))
+    print(c(C.RED, "          This is likely due to Wordfence API rate limiting."))
+    print(c(C.RED, "          Try running the scan again after a few minutes."))
+    return False
+
+
+def run_scan(users, scan_type):
+    """
+    Launch the chosen Wordfence scan for each cPanel user.
+
+    Strategy for multiple users:
+      1. Run the first user normally -- Wordfence downloads the vulnerability
+         index (~90MB) from the API and caches it in ~/.cache/wordfence/
+      2. For each subsequent user, copy that cached file directly from user 1
+         before running their scan -- no extra API calls needed.
+      3. After each subsequent user's scan completes, remove the copied cache
+         file from their home directory to keep things tidy.
+    """
+    meta       = SCAN_MAP[scan_type]
+    total      = len(users)
+    first_user = users[0]
+
+    for index, user in enumerate(users, 1):
+        wp_path = ask_wp_path(user)
+        cmd     = meta["cmd_tpl"].format(wp_path=wp_path)
+        out     = meta["out_file"]
+
+        section("[{}/{}] Running {} for user: {}".format(index, total, scan_type, user))
+        print("  Scan user        : " + c(C.CYAN,    C.BOLD + user))
+        print("  Scan path        : " + c(C.MAGENTA, wp_path))
+        print("  Command          : " + cmd)
+        print("  Results saved to : " + c(C.BLUE,    C.BOLD + "/home/{}/{}".format(user, out.replace("~/", ""))))
+        print("  Max retries      : {}".format(MAX_RETRIES))
+        print("")
+
+        is_first = (index == 1)
+        cache_was_copied = False
+
+        if is_first:
+            print(c(C.YELLOW, "  [CACHE] First user -- vulnerability index will be downloaded from Wordfence API."))
+            print(c(C.YELLOW, "          This will be shared with subsequent users to avoid rate limiting."))
+        else:
+            print(c(C.YELLOW, "  [CACHE] Copying vulnerability index from '{}' to avoid API re-download ...".format(first_user)))
+            cache_was_copied = copy_vuln_cache(first_user, user)
+
+        print("")
+        run_scan_with_retry(user, cmd, out)
+
+        # Clean up the copied cache file after the scan to keep the user's home tidy
+        if cache_was_copied:
+            print("")
+            print(c(C.YELLOW, "  [CACHE] Cleaning up copied vulnerability cache from '{}' ...".format(user)))
+            remove_vuln_cache(user)
+
+    section("All scans complete")
+    print(c(C.GREEN, C.BOLD + "  All {} user(s) processed successfully.".format(total)))
 
 # ----------------------------- entry point ----------------------------------
 
@@ -377,14 +523,21 @@ def main():
 
     # Scan branch
     else:
-        users = ask_users("Enter the cPanel username to scan", multiple=False)
-        user = users[0]
-        wp_path = ask_wp_path(user)
+        raw_users = input("\nEnter cPanel username(s) to scan (comma-separated): ").strip()
+        users = [u.strip() for u in raw_users.split(",") if u.strip()]
+        if not users:
+            print("  No users entered. Exiting.")
+            sys.exit(1)
+
         scan_type = prompt_choice(
             "Which type of scan would you like to run?",
             list(SCAN_MAP.keys()),
         )
-        run_scan(user, scan_type, wp_path)
+        if len(users) > 1:
+            print("\n  [INFO] {} users queued.".format(len(users)))
+            print("  [INFO] Vulnerability index will be downloaded once for the first")
+            print("         user and copied to subsequent users to avoid API rate limiting.")
+        run_scan(users, scan_type)
 
     print("\n  Done. Goodbye!\n")
 
